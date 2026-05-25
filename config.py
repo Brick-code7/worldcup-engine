@@ -13,7 +13,6 @@ REDDIT_USER_AGENT = os.getenv("REDDIT_USER_AGENT", "worldcup-engine/1.0")
 # Pipeline
 MAX_ARTICLE_AGE_HOURS = int(os.getenv("MAX_ARTICLE_AGE_HOURS", "6"))
 MIN_REDDIT_SCORE = int(os.getenv("MIN_REDDIT_SCORE", "50"))
-DB_PATH = os.getenv("DB_PATH", "./data/worldcup.db")
 
 # Active content bucket — controls which output formatter runs
 # Options: "team_news" (more buckets added in later phases)

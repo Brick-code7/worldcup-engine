@@ -1,65 +1,79 @@
 from __future__ import annotations
 
+"""
+Database layer using Turso (hosted libSQL / SQLite-compatible).
+
+Turso persists across routine runs — unlike a local SQLite file which is
+lost when the cloned repo is discarded at the end of each routine session.
+
+Env vars required:
+  TURSO_DATABASE_URL  e.g. libsql://worldcup-engine-xxx.turso.io
+  TURSO_AUTH_TOKEN    JWT token from `turso db tokens create <db>`
+"""
+
 import json
 import os
-import sqlite3
 from datetime import datetime, timezone
+from typing import Any
 
-from config import DB_PATH
+import httpx
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from models.content_item import ContentItem
 
 
-def _get_connection() -> sqlite3.Connection:
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+def _turso_url() -> str:
+    url = os.getenv("TURSO_DATABASE_URL", "")
+    if not url:
+        raise RuntimeError("TURSO_DATABASE_URL is not set. Add it to your .env file.")
+    # Convert libsql:// → https:// for the HTTP API
+    return url.replace("libsql://", "https://")
 
 
-def init_db() -> None:
-    conn = _get_connection()
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS content_items (
-            id TEXT PRIMARY KEY,
-            source TEXT NOT NULL,
-            headline TEXT NOT NULL,
-            body TEXT NOT NULL DEFAULT '',
-            url TEXT NOT NULL UNIQUE,
-            image_url TEXT,
-            published_at TEXT NOT NULL,
-            engagement_score INTEGER NOT NULL DEFAULT 0,
-            article_type TEXT,
-            raw TEXT NOT NULL DEFAULT '{}',
-            ingested_at TEXT NOT NULL,
-            rank_score REAL NOT NULL DEFAULT 0.0,
-            status TEXT NOT NULL DEFAULT 'raw'
+def _turso_token() -> str:
+    token = os.getenv("TURSO_AUTH_TOKEN", "")
+    if not token:
+        raise RuntimeError("TURSO_AUTH_TOKEN is not set. Add it to your .env file.")
+    return token
+
+
+def _execute(statements: list[dict[str, Any]]) -> list[dict]:
+    """
+    Execute one or more SQL statements via Turso's HTTP pipeline API.
+    Returns the results list from the response.
+    """
+    requests = [{"type": "execute", "stmt": s} for s in statements]
+    requests.append({"type": "close"})
+
+    try:
+        resp = httpx.post(
+            f"{_turso_url()}/v2/pipeline",
+            headers={
+                "Authorization": f"Bearer {_turso_token()}",
+                "Content-Type": "application/json",
+            },
+            json={"requests": requests},
+            timeout=15,
         )
-    """)
-    conn.commit()
-    conn.close()
-    print(f"  [DB] Initialized database at {DB_PATH}")
+        resp.raise_for_status()
+        return resp.json().get("results", [])
+    except httpx.HTTPStatusError as e:
+        raise RuntimeError(f"Turso HTTP error {e.response.status_code}: {e.response.text}") from e
 
 
-def _item_to_row(item: ContentItem) -> tuple:
-    return (
-        item.id,
-        item.source,
-        item.headline,
-        item.body,
-        item.url,
-        item.image_url,
-        item.published_at.isoformat() if item.published_at else "",
-        item.engagement_score,
-        item.article_type,
-        json.dumps(item.raw, default=str),
-        item.ingested_at.isoformat() if item.ingested_at else datetime.now(timezone.utc).isoformat(),
-        item.rank_score,
-        item.status,
-    )
+def _val(cell: dict) -> Any:
+    """Parse a Turso cell value — cells are {'type': 'text'|'integer'|'float'|'null', 'value': ...}"""
+    if cell.get("type") == "null":
+        return None
+    return cell.get("value")
 
 
-def _row_to_item(row: sqlite3.Row) -> ContentItem:
-    def parse_dt(s):
+def _row_to_item(cols: list[str], row: list[dict]) -> ContentItem:
+    data = {cols[i]: _val(row[i]) for i in range(len(cols))}
+
+    def parse_dt(s: str | None) -> datetime:
         if not s:
             return datetime.now(timezone.utc)
         try:
@@ -68,86 +82,121 @@ def _row_to_item(row: sqlite3.Row) -> ContentItem:
         except Exception:
             return datetime.now(timezone.utc)
 
-    item = ContentItem(
-        id=row["id"],
-        source=row["source"],
-        headline=row["headline"],
-        body=row["body"],
-        url=row["url"],
-        image_url=row["image_url"],
-        published_at=parse_dt(row["published_at"]),
-        engagement_score=row["engagement_score"],
-        article_type=row["article_type"],
-        raw=json.loads(row["raw"]) if row["raw"] else {},
-        ingested_at=parse_dt(row["ingested_at"]),
-        rank_score=row["rank_score"],
-        status=row["status"],
+    return ContentItem(
+        id=data["id"],
+        source=data["source"],
+        headline=data["headline"],
+        body=data.get("body") or "",
+        url=data["url"],
+        image_url=data.get("image_url"),
+        published_at=parse_dt(data.get("published_at")),
+        engagement_score=int(data.get("engagement_score") or 0),
+        article_type=data.get("article_type"),
+        raw=json.loads(data.get("raw") or "{}"),
+        ingested_at=parse_dt(data.get("ingested_at")),
+        rank_score=float(data.get("rank_score") or 0.0),
+        status=data.get("status") or "raw",
+        urgency=data.get("urgency") or "update",
+        player=data.get("player"),
+        team=data.get("team"),
     )
-    return item
+
+
+def init_db() -> None:
+    _execute([{
+        "sql": """
+            CREATE TABLE IF NOT EXISTS content_items (
+                id               TEXT PRIMARY KEY,
+                source           TEXT NOT NULL,
+                headline         TEXT NOT NULL,
+                body             TEXT NOT NULL DEFAULT '',
+                url              TEXT NOT NULL UNIQUE,
+                image_url        TEXT,
+                published_at     TEXT NOT NULL,
+                engagement_score INTEGER NOT NULL DEFAULT 0,
+                article_type     TEXT,
+                raw              TEXT NOT NULL DEFAULT '{}',
+                ingested_at      TEXT NOT NULL,
+                rank_score       REAL NOT NULL DEFAULT 0.0,
+                status           TEXT NOT NULL DEFAULT 'raw',
+                urgency          TEXT NOT NULL DEFAULT 'update',
+                player           TEXT,
+                team             TEXT
+            )
+        """,
+        "args": [],
+    }])
+    print("  [DB] Turso database initialised")
 
 
 def save_items(items: list[ContentItem]) -> int:
     if not items:
         return 0
 
-    conn = _get_connection()
-    saved = 0
-
+    statements = []
     for item in items:
-        try:
-            conn.execute(
-                """
+        statements.append({
+            "sql": """
                 INSERT OR IGNORE INTO content_items
                 (id, source, headline, body, url, image_url, published_at,
-                 engagement_score, article_type, raw, ingested_at, rank_score, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                _item_to_row(item),
-            )
-            if conn.total_changes > saved:
-                saved = conn.total_changes
-        except Exception as e:
-            print(f"  [DB] Error saving item '{item.headline[:50]}': {e}")
-            continue
+                 engagement_score, article_type, raw, ingested_at, rank_score,
+                 status, urgency, player, team)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            "args": [
+                {"type": "text",    "value": item.id},
+                {"type": "text",    "value": item.source},
+                {"type": "text",    "value": item.headline},
+                {"type": "text",    "value": item.body},
+                {"type": "text",    "value": item.url},
+                {"type": "text",    "value": item.image_url} if item.image_url else {"type": "null"},
+                {"type": "text",    "value": item.published_at.isoformat()},
+                {"type": "integer", "value": str(item.engagement_score)},
+                {"type": "text",    "value": item.article_type} if item.article_type else {"type": "null"},
+                {"type": "text",    "value": json.dumps(item.raw, default=str)},
+                {"type": "text",    "value": item.ingested_at.isoformat()},
+                {"type": "float",   "value": float(item.rank_score)},
+                {"type": "text",    "value": item.status},
+                {"type": "text",    "value": item.urgency},
+                {"type": "text",    "value": item.player} if item.player else {"type": "null"},
+                {"type": "text",    "value": item.team} if item.team else {"type": "null"},
+            ],
+        })
 
-    conn.commit()
+    results = _execute(statements)
 
-    # Count actually inserted rows
-    cursor = conn.execute(
-        "SELECT COUNT(*) FROM content_items WHERE ingested_at >= ?",
-        (items[0].ingested_at.isoformat(),) if items else ("",),
+    # Count successful inserts (rows_affected > 0 means it wasn't a duplicate)
+    saved = sum(
+        1 for r in results
+        if r.get("type") == "ok"
+        and r.get("response", {}).get("result", {}).get("rows_affected", 0) > 0
     )
-    result = cursor.fetchone()
-    inserted = result[0] if result else 0
-    conn.close()
-    return inserted
+    return saved
 
 
 def get_pending_items(limit: int = 10) -> list[ContentItem]:
-    conn = _get_connection()
-    cursor = conn.execute(
-        """
-        SELECT * FROM content_items
-        WHERE status = 'raw'
-        ORDER BY rank_score DESC
-        LIMIT ?
-        """,
-        (limit,),
-    )
-    rows = cursor.fetchall()
-    conn.close()
-    return [_row_to_item(row) for row in rows]
+    results = _execute([{
+        "sql": "SELECT * FROM content_items WHERE status = 'raw' ORDER BY rank_score DESC LIMIT ?",
+        "args": [{"type": "integer", "value": str(limit)}],
+    }])
+
+    if not results or results[0].get("type") != "ok":
+        return []
+
+    result_data = results[0]["response"]["result"]
+    cols = [c["name"] for c in result_data["cols"]]
+    return [_row_to_item(cols, row) for row in result_data["rows"]]
 
 
 def mark_status(item_id: str, status: str) -> None:
-    valid_statuses = {"raw", "queued", "generated", "published"}
-    if status not in valid_statuses:
-        raise ValueError(f"Invalid status '{status}'. Must be one of: {valid_statuses}")
+    valid = {"raw", "queued", "generated", "published"}
+    if status not in valid:
+        raise ValueError(f"Invalid status '{status}'. Must be one of: {valid}")
 
-    conn = _get_connection()
-    conn.execute(
-        "UPDATE content_items SET status = ? WHERE id = ?",
-        (status, item_id),
-    )
-    conn.commit()
-    conn.close()
+    _execute([{
+        "sql": "UPDATE content_items SET status = ? WHERE id = ?",
+        "args": [
+            {"type": "text", "value": status},
+            {"type": "text", "value": item_id},
+        ],
+    }])
