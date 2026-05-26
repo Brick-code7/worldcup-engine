@@ -14,8 +14,8 @@ __pycache__/
 dist/
 build/
 
-# Output files — generated at runtime
-output/
+# Output files — generated at runtime (ignore JSON but keep the Python package)
+output/*.json
 
 # macOS
 .DS_Store
