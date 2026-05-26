@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import re
 import uuid
 from datetime import datetime, timezone
@@ -9,12 +10,7 @@ from models.content_item import ContentItem
 
 def _strip_html(text: str) -> str:
     text = re.sub(r"<[^>]+>", " ", text)
-    text = re.sub(r"&amp;", "&", text)
-    text = re.sub(r"&lt;", "<", text)
-    text = re.sub(r"&gt;", ">", text)
-    text = re.sub(r"&quot;", '"', text)
-    text = re.sub(r"&#39;", "'", text)
-    text = re.sub(r"&[a-zA-Z]+;", " ", text)
+    text = html.unescape(text)  # handles &#8220; &#8221; &amp; &lt; etc.
     return text
 
 

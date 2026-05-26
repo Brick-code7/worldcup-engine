@@ -9,8 +9,9 @@ from processing.normalize import normalize
 from processing.filter import filter_items
 from processing.classify import classify
 from processing.rank import rank_items
-from storage.database import init_db, save_items, get_pending_items
-from output.formatter import write_output
+from processing.caption import generate_captions
+from storage.database import init_db, save_items, get_pending_items, mark_status
+from output.formatter import format_items, write_output
 from utils.scraper import make_client
 
 
@@ -63,21 +64,33 @@ async def run_pipeline():
     saved = save_items(ranked)
     print(f"Saved {saved} new items")
 
-    # 7. Write Higgsfield-ready JSON output
-    print("\n[Step 7] Writing output JSON for Higgsfield...")
+    # 7. Format + generate captions + write output
+    print("\n[Step 7] Generating Instagram captions...")
     top_items = get_pending_items(limit=20)
-    output_path = write_output(top_items)
+    formatted = format_items(top_items)
+    formatted = generate_captions(top_items, formatted)
+
+    print("\n[Step 8] Writing output JSON...")
+    output_path = write_output(formatted)
     print(f"Output written → {output_path}")
 
-    # 8. Preview top 5
+    # 9. Mark output items as queued so they don't repeat next run
+    for item in top_items:
+        mark_status(item.id, "queued")
+    print(f"  Marked {len(top_items)} items as 'queued'")
+
+    # 10. Preview top 5
     print("\n" + "=" * 60)
     print("TOP 5 TEAM NEWS ITEMS")
     print("=" * 60)
+    caption_map = {d["id"]: d.get("instagram_caption", "") for d in formatted}
+
     for item in top_items[:5]:
         urgency_label = getattr(item, "urgency", "update").upper()
         type_label = (item.article_type or "other").upper()
         player = getattr(item, "player", None)
         team = getattr(item, "team", None)
+        caption = caption_map.get(item.id, "")
 
         print(f"\n[{urgency_label}] [{type_label}] {item.headline}")
         print(f"  Player   : {player or '—'}  |  Team: {team or '—'}")
@@ -87,6 +100,8 @@ async def run_pipeline():
         print(f"  URL      : {item.url}")
         if item.image_url:
             print(f"  Img URL  : {item.image_url}")
+        if caption:
+            print(f"  Caption  :\n{caption}")
 
     print("\n" + "=" * 60)
     print("Pipeline complete.")
