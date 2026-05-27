@@ -10,9 +10,16 @@ from processing.filter import filter_items
 from processing.classify import classify
 from processing.rank import rank_items
 from processing.caption import generate_captions
-from storage.database import init_db, save_items, get_pending_items, mark_status
 from output.formatter import format_items, write_output
 from utils.scraper import make_client
+
+# DB is optional — pipeline runs in stateless mode if unavailable
+_DB_AVAILABLE = False
+try:
+    from storage.database import init_db, save_items, get_pending_items, mark_status
+    _DB_AVAILABLE = True
+except Exception:
+    pass
 
 
 async def run_pipeline():
@@ -59,14 +66,18 @@ async def run_pipeline():
     print("\n[Step 5] Ranking...")
     ranked = rank_items(classified)
 
-    # 6. Store
+    # 6. Store (skipped if DB unavailable)
     print("\n[Step 6] Saving to database...")
-    saved = save_items(ranked)
-    print(f"Saved {saved} new items")
+    if _DB_AVAILABLE:
+        saved = save_items(ranked)
+        print(f"Saved {saved} new items")
+        top_items = get_pending_items(limit=20)
+    else:
+        print("  [DB] Not available — running in stateless mode")
+        top_items = ranked[:20]
 
     # 7. Format + generate captions + write output
     print("\n[Step 7] Generating Instagram captions...")
-    top_items = get_pending_items(limit=20)
     formatted = format_items(top_items)
     formatted = generate_captions(top_items, formatted)
 
@@ -75,9 +86,10 @@ async def run_pipeline():
     print(f"Output written → {output_path}")
 
     # 9. Mark output items as queued so they don't repeat next run
-    for item in top_items:
-        mark_status(item.id, "queued")
-    print(f"  Marked {len(top_items)} items as 'queued'")
+    if _DB_AVAILABLE:
+        for item in top_items:
+            mark_status(item.id, "queued")
+        print(f"  Marked {len(top_items)} items as 'queued'")
 
     # 10. Preview top 5
     print("\n" + "=" * 60)
@@ -109,5 +121,10 @@ async def run_pipeline():
 
 
 if __name__ == "__main__":
-    init_db()
+    if _DB_AVAILABLE:
+        try:
+            init_db()
+        except Exception as e:
+            print(f"  [DB] Connection failed ({e}) — running in stateless mode")
+            globals()["_DB_AVAILABLE"] = False
     asyncio.run(run_pipeline())
