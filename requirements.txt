@@ -6,3 +6,4 @@ pillow>=10.0.0
 python-dotenv>=1.0.0
 lxml_html_clean
 anthropic>=0.100.0
+replicate>=0.30.0

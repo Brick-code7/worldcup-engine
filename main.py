@@ -10,6 +10,7 @@ from processing.filter import filter_items
 from processing.classify import classify
 from processing.rank import rank_items
 from processing.caption import generate_captions
+from processing.image_gen import generate_images
 from output.formatter import format_items, write_output
 from utils.scraper import make_client
 
@@ -81,6 +82,12 @@ async def run_pipeline():
     formatted = format_items(top_items)
     formatted = generate_captions(top_items, formatted)
 
+    # 7b. Generate AI images for top items
+    print("\n[Step 7b] Generating AI images for top items...")
+    import os as _os
+    top_n = int(_os.getenv("IMAGE_GEN_TOP_N", "5"))
+    formatted = generate_images(formatted, top_n=top_n)
+
     print("\n[Step 8] Writing output JSON...")
     output_path = write_output(formatted)
     print(f"Output written → {output_path}")
@@ -96,6 +103,7 @@ async def run_pipeline():
     print("TOP 5 TEAM NEWS ITEMS")
     print("=" * 60)
     caption_map = {d["id"]: d.get("instagram_caption", "") for d in formatted}
+    gen_image_map = {d["id"]: d.get("generated_image_url") for d in formatted}
 
     for item in top_items[:5]:
         urgency_label = getattr(item, "urgency", "update").upper()
@@ -112,6 +120,9 @@ async def run_pipeline():
         print(f"  URL      : {item.url}")
         if item.image_url:
             print(f"  Img URL  : {item.image_url}")
+        gen_img = gen_image_map.get(item.id)
+        if gen_img:
+            print(f"  AI Image : {gen_img}")
         if caption:
             print(f"  Caption  :\n{caption}")
 
